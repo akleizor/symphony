@@ -25,40 +25,50 @@ defmodule SymphonyElixir.WorkflowStore do
 
   @spec current() :: {:ok, Workflow.loaded_workflow()} | {:error, term()}
   def current do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :current)
-
-      _ ->
-        Workflow.load()
-    end
+    call_store(:current, &Workflow.load/0)
   end
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :settings)
-
-      _ ->
-        case load_state(Workflow.workflow_file_path()) do
-          {:ok, %State{settings: settings}} -> {:ok, settings}
-          {:error, reason} -> {:error, reason}
-        end
-    end
+    call_store(:settings, &settings_from_disk/0)
   end
 
   @spec force_reload() :: :ok | {:error, term()}
   def force_reload do
+    call_store(:force_reload, &reload_from_disk/0)
+  end
+
+  # A call to a busy store must not crash its caller. `Config.settings!/0` runs on every
+  # Orchestrator tick, and a 5 s call timeout used to restart the Orchestrator and end every
+  # running turn (agents-harness#633, 2026-11-18: 62 of 98 Hive turns). Reading the file is
+  # what the store would have done, and its next poll refreshes the cache.
+  defp call_store(message, fallback) do
     case Process.whereis(__MODULE__) do
       pid when is_pid(pid) ->
-        GenServer.call(__MODULE__, :force_reload)
+        try do
+          GenServer.call(pid, message)
+        catch
+          :exit, reason ->
+            Logger.warning("WorkflowStore call #{message} exited (#{inspect(reason)}); reading the workflow file")
+            fallback.()
+        end
 
       _ ->
-        case load_state(Workflow.workflow_file_path()) do
-          {:ok, _state} -> :ok
-          {:error, reason} -> {:error, reason}
-        end
+        fallback.()
+    end
+  end
+
+  defp settings_from_disk do
+    case load_state(Workflow.workflow_file_path()) do
+      {:ok, %State{settings: settings}} -> {:ok, settings}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp reload_from_disk do
+    case load_state(Workflow.workflow_file_path()) do
+      {:ok, _state} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
