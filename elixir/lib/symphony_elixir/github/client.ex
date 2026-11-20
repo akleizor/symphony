@@ -68,11 +68,11 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   @doc false
-  @doc false
   @spec perform_request_for_test(String.t(), String.t(), map(), term(), map()) :: {:ok, map()} | {:error, term()}
   def perform_request_for_test(method, path, params, body, settings),
     do: perform_request(method, path, params, body, settings)
 
+  @doc false
   @spec fetch_issues_by_ids_for_test([String.t()], map(), function()) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids_for_test(issue_ids, tracker_settings, request_fun)
