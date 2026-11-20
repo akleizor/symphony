@@ -215,7 +215,8 @@ defmodule SymphonyElixir.Config.Schema do
       )
       |> validate_required([:command])
       |> validate_change(:command, fn :command, command ->
-        if command != "" and String.trim(command) == "" do
+        # ecto 3.14's validate_required no longer treats "" as missing under empty_values: []
+        if String.trim(command) == "" do
           [command: "can't be blank"]
         else
           []

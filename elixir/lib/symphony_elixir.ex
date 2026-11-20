@@ -19,6 +19,8 @@ defmodule SymphonyElixir.Application do
 
   use Application
 
+  alias SymphonyElixir.GitHub.Client, as: GitHubClient
+
   @dialyzer {:nowarn_function, start_burrito_cli: 0}
 
   @impl true
@@ -34,6 +36,7 @@ defmodule SymphonyElixir.Application do
   @spec start_runtime() :: Supervisor.on_start()
   def start_runtime do
     :ok = SymphonyElixir.LogFile.configure()
+    :ok = GitHubClient.init_etag_cache()
 
     children = [
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},

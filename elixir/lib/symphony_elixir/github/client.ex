@@ -7,6 +7,7 @@ defmodule SymphonyElixir.GitHub.Client do
   alias SymphonyElixir.Config
   alias SymphonyElixir.Tracker.Issue
 
+  @etag_table :symphony_github_etags
   @default_api_url "https://api.github.com"
   @api_version "2022-11-28"
   @page_size 100
@@ -65,6 +66,11 @@ defmodule SymphonyElixir.GitHub.Client do
       when is_list(state_names) and is_map(tracker_settings) and is_function(request_fun, 5) do
     fetch_issues_by_states(state_names, tracker_settings, request_fun)
   end
+
+  @doc false
+  @spec perform_request_for_test(String.t(), String.t(), map(), term(), map()) :: {:ok, map()} | {:error, term()}
+  def perform_request_for_test(method, path, params, body, settings),
+    do: perform_request(method, path, params, body, settings)
 
   @doc false
   @spec fetch_issues_by_ids_for_test([String.t()], map(), function()) ::
@@ -275,11 +281,58 @@ defmodule SymphonyElixir.GitHub.Client do
 
       request_opts = if is_nil(body), do: request_opts, else: Keyword.put(request_opts, :json, body)
 
-      case Req.request(request_opts) do
-        {:ok, response} -> {:ok, %{status: response.status, body: response.body}}
-        {:error, reason} -> {:error, {:github_api_request, reason}}
-      end
+      key = {request_opts[:url], params, settings.token}
+      cached = if request_method == :get, do: etag_lookup(key)
+
+      request_opts
+      |> with_etag(cached)
+      |> Req.request()
+      |> etag_response(key, cached)
     end
+  end
+
+  defp with_etag(request_opts, nil), do: request_opts
+
+  defp with_etag(request_opts, {etag, _body}),
+    do: Keyword.update!(request_opts, :headers, &[{"If-None-Match", etag} | &1])
+
+  # a 304 does not count against GitHub's REST rate limit: every unchanged poll is free
+  defp etag_response({:ok, %{status: 304}}, _key, {_etag, body}), do: {:ok, %{status: 200, body: body}}
+
+  defp etag_response({:ok, %{status: 200} = response}, key, _cached) do
+    case Req.Response.get_header(response, "etag") do
+      [etag | _] -> etag_store(key, etag, response.body)
+      [] -> :ok
+    end
+
+    {:ok, %{status: 200, body: response.body}}
+  end
+
+  defp etag_response({:ok, response}, _key, _cached), do: {:ok, %{status: response.status, body: response.body}}
+  defp etag_response({:error, reason}, _key, _cached), do: {:error, {:github_api_request, reason}}
+
+  @doc "Creates the ETag cache; the caller owns it, so call it from a process that lives as long as the app."
+  @spec init_etag_cache() :: :ok
+  def init_etag_cache do
+    if :ets.whereis(@etag_table) == :undefined,
+      do: :ets.new(@etag_table, [:named_table, :public, :set, read_concurrency: true])
+
+    :ok
+  end
+
+  # no table (a test that never started the app): every request is a plain one
+  defp etag_lookup(key) do
+    with tid when tid != :undefined <- :ets.whereis(@etag_table),
+         [{^key, etag, body}] <- :ets.lookup(tid, key) do
+      {etag, body}
+    else
+      _ -> nil
+    end
+  end
+
+  defp etag_store(key, etag, body) do
+    if :ets.whereis(@etag_table) != :undefined, do: :ets.insert(@etag_table, {key, etag, body})
+    :ok
   end
 
   defp settings(tracker_settings) when is_map(tracker_settings) do
