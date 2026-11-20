@@ -284,32 +284,32 @@ defmodule SymphonyElixir.GitHub.Client do
       key = {request_opts[:url], params, settings.token}
       cached = if request_method == :get, do: etag_lookup(key)
 
-      request_opts =
-        case cached do
-          {etag, _body} -> Keyword.update!(request_opts, :headers, &[{"If-None-Match", etag} | &1])
-          nil -> request_opts
-        end
-
-      case Req.request(request_opts) do
-        # a 304 does not count against GitHub's REST rate limit: every unchanged poll is free
-        {:ok, %{status: 304}} when cached != nil ->
-          {:ok, %{status: 200, body: elem(cached, 1)}}
-
-        {:ok, response} ->
-          if request_method == :get and response.status == 200 do
-            case Req.Response.get_header(response, "etag") do
-              [etag | _] -> etag_store(key, etag, response.body)
-              [] -> :ok
-            end
-          end
-
-          {:ok, %{status: response.status, body: response.body}}
-
-        {:error, reason} ->
-          {:error, {:github_api_request, reason}}
-      end
+      request_opts
+      |> with_etag(cached)
+      |> Req.request()
+      |> etag_response(key, cached)
     end
   end
+
+  defp with_etag(request_opts, nil), do: request_opts
+
+  defp with_etag(request_opts, {etag, _body}),
+    do: Keyword.update!(request_opts, :headers, &[{"If-None-Match", etag} | &1])
+
+  # a 304 does not count against GitHub's REST rate limit: every unchanged poll is free
+  defp etag_response({:ok, %{status: 304}}, _key, {_etag, body}), do: {:ok, %{status: 200, body: body}}
+
+  defp etag_response({:ok, %{status: 200} = response}, key, _cached) do
+    case Req.Response.get_header(response, "etag") do
+      [etag | _] -> etag_store(key, etag, response.body)
+      [] -> :ok
+    end
+
+    {:ok, %{status: 200, body: response.body}}
+  end
+
+  defp etag_response({:ok, response}, _key, _cached), do: {:ok, %{status: response.status, body: response.body}}
+  defp etag_response({:error, reason}, _key, _cached), do: {:error, {:github_api_request, reason}}
 
   @doc "Creates the ETag cache; the caller owns it, so call it from a process that lives as long as the app."
   @spec init_etag_cache() :: :ok
