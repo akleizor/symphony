@@ -34,6 +34,7 @@ defmodule SymphonyElixir.Application do
   @spec start_runtime() :: Supervisor.on_start()
   def start_runtime do
     :ok = SymphonyElixir.LogFile.configure()
+    :ok = SymphonyElixir.GitHub.Client.init_etag_cache()
 
     children = [
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},
