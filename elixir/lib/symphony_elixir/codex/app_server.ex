@@ -964,18 +964,23 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp stop_port(port) when is_port(port) do
-    case :erlang.port_info(port) do
+    case :erlang.port_info(port, :os_pid) do
       :undefined ->
         :ok
 
-      _ ->
+      {:os_pid, os_pid} ->
+        # Closing the pipes only asks: an app server that has not reached its read loop (one starved at startup) never
+        # sees EOF, and every session given up on stayed alive (2026-11-24: 290 of them, load 850 on 18 cores).
+        # Signalled while the port is open, so the pid is still this port's child, never a reused one.
+        System.cmd("kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
         try do
           Port.close(port)
-          :ok
         rescue
-          ArgumentError ->
-            :ok
+          ArgumentError -> :ok
         end
+
+        :ok
     end
   end
 
