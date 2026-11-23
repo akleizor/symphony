@@ -807,7 +807,8 @@ Retry handling behavior:
 3. If found in a terminal state, clean its workspace and release claim.
 4. If found and still active and routable:
    - Dispatch if slots are available.
-   - Otherwise requeue with error `no available orchestrator slots`.
+   - Otherwise release the claim and keep the attempt: the next poll dispatches it in priority and age order. No
+     slot is not a failure and never grows the retry delay.
 5. If found but no longer active or routable, release claim without dispatch.
 
 Note:
@@ -1537,7 +1538,7 @@ Minimum endpoints:
           "issue_url": "https://tracker.example/issues/MT-650",
           "attempt": 3,
           "due_at": "2026-02-24T20:16:00Z",
-          "error": "no available orchestrator slots"
+          "error": "agent exited: turn_timeout"
         }
       ],
       "codex_totals": {
@@ -2038,10 +2039,9 @@ on_retry_timer(issue_id, state):
     return state
 
   if no_available_slots(state):
-    return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
-      identifier: issue.identifier,
-      error: "no available orchestrator slots"
-    })
+    state.claimed.remove(issue_id)
+    state.slot_waits[issue_id] = retry_entry.attempt
+    return state
 
   return dispatch_issue(issue, state, attempt=retry_entry.attempt)
 ```

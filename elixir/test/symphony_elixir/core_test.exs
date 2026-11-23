@@ -953,6 +953,57 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(updated_state.retry_attempts, issue_id)
   end
 
+  test "a retry that finds no slot goes back to the poll's queue and keeps its attempt" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-no-slot-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: test_root,
+      hook_before_run: "exit 1",
+      max_concurrent_agents: 1
+    )
+
+    issue_id = "retry-no-slot"
+    busy = %Issue{id: "busy", identifier: "MT-1", title: "Busy", state: "In Progress", labels: []}
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-567",
+      title: "Waits for a slot",
+      state: "In Progress",
+      dispatchable: true,
+      labels: []
+    }
+
+    full = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{busy.id => %{issue: busy, identifier: busy.identifier}},
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    waiting =
+      Orchestrator.handle_retry_issue_lookup_for_test(issue, full, issue_id, 3, %{
+        identifier: issue.identifier,
+        error: "agent exited"
+      })
+
+    refute MapSet.member?(waiting.claimed, issue_id)
+    refute Map.has_key?(waiting.retry_attempts, issue_id)
+    assert waiting.slot_waits[issue_id] == {3, nil}
+    refute Orchestrator.should_dispatch_issue_for_test(issue, waiting)
+
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    free = %{waiting | running: %{}, task_supervisor: task_supervisor}
+
+    dispatched = Orchestrator.choose_issues_for_test([issue], free)
+
+    assert dispatched.running[issue_id].retry_attempt == 3
+    assert dispatched.slot_waits == %{}
+  end
+
   test "retry releases its claim when dispatch revalidation no longer finds the issue" do
     test_root =
       Path.join(

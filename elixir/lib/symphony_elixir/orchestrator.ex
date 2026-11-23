@@ -39,6 +39,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      slot_waits: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -380,6 +381,10 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, updated_state} = handle_retry_issue_lookup(issue, state, issue_id, attempt, metadata)
     updated_state
   end
+
+  @doc false
+  @spec choose_issues_for_test([Issue.t()], term()) :: term()
+  def choose_issues_for_test(issues, %State{} = state), do: choose_issues(issues, state)
 
   @doc false
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
@@ -786,7 +791,8 @@ defmodule SymphonyElixir.Orchestrator do
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
       if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
+        {attempt, worker_host} = Map.get(state_acc.slot_waits, issue.id, {nil, nil})
+        dispatch_issue(state_acc, issue, attempt, worker_host)
       else
         state_acc
       end
@@ -987,7 +993,8 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
+            retry_attempts: Map.delete(state.retry_attempts, issue.id),
+            slot_waits: Map.delete(state.slot_waits, issue.id)
         }
 
       {:error, reason} ->
@@ -1205,18 +1212,12 @@ defmodule SymphonyElixir.Orchestrator do
            )}
       end
     else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+      Logger.debug("No available slots for retrying #{issue_context(issue)}; back in the poll's queue")
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+      # No slot is not a failure: held back behind a growing retry delay, an issue lost every free slot to newer
+      # issues the poll picked first. Back in the poll's queue it waits in priority and age order, keeping its attempt.
+      released = release_issue_claim(state, issue.id)
+      {:noreply, %{released | slot_waits: Map.put(released.slot_waits, issue.id, {attempt, metadata[:worker_host]})}}
     end
   end
 
@@ -1225,7 +1226,8 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | claimed: MapSet.delete(state.claimed, issue_id),
         blocked: Map.delete(state.blocked, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        slot_waits: Map.delete(state.slot_waits, issue_id)
     }
   end
 
