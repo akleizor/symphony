@@ -165,6 +165,49 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "a session the app server gives up on ends its process, read loop reached or not" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-app-server-stop-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-STOP")
+      codex_binary = Path.join(test_root, "fake-codex")
+      pid_file = Path.join(test_root, "pid")
+      File.mkdir_p!(workspace)
+
+      # Never reads stdin, so closing the pipes alone never reaches it (a server starved before its read loop).
+      File.write!(codex_binary, """
+      #!/bin/sh
+      echo $$ > #{pid_file}
+      exec sleep 600
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_read_timeout_ms: 200
+      )
+
+      assert {:error, :response_timeout} = AppServer.start_session(workspace)
+      os_pid = pid_file |> File.read!() |> String.trim()
+      assert Enum.any?(1..100, fn _ -> gone?(os_pid) || (Process.sleep(50) && false) end)
+    after
+      if File.exists?(Path.join(test_root, "pid")) do
+        System.cmd("kill", ["-KILL", String.trim(File.read!(Path.join(test_root, "pid")))], stderr_to_stdout: true)
+      end
+
+      File.rm_rf(test_root)
+    end
+  end
+
+  defp gone?(os_pid) do
+    {stat, _} = System.cmd("ps", ["-o", "stat=", "-p", os_pid], stderr_to_stdout: true)
+    stat == "" or String.starts_with?(stat, "Z")
+  end
+
   test "app server passes explicit turn sandbox policies through unchanged" do
     test_root =
       Path.join(
