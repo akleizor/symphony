@@ -121,6 +121,21 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
     assert issue.url == "https://github.test/octo/repo/issues/42"
     assert issue.assignee_id == "octocat"
     assert issue.labels == ["bug", "platform"]
+    assert issue.priority == nil
+
+    labelled =
+      Map.put(raw_issue(44), "labels", [
+        %{"name" => "Priority:3"},
+        %{"name" => "priority:1"},
+        %{"name" => "priority:9"}
+      ])
+
+    assert GitHubClient.normalize_issue_for_test(labelled, "octo/repo").priority == 1
+
+    ignored =
+      Map.put(raw_issue(45), "labels", [%{"name" => "priority:0"}, %{"name" => "priority:high"}])
+
+    assert GitHubClient.normalize_issue_for_test(ignored, "octo/repo").priority == nil
     assert issue.blocked_by == []
     assert issue.dispatchable
     assert %DateTime{} = issue.created_at
