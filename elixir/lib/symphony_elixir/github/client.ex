@@ -189,6 +189,8 @@ defmodule SymphonyElixir.GitHub.Client do
     issue_number = issue["number"]
     state = issue["state"]
 
+    labels = extract_labels(issue)
+
     if is_integer(issue_number) and issue_number > 0 and
          Enum.all?([issue["title"], state], &present_string?/1) do
       %Issue{
@@ -200,7 +202,8 @@ defmodule SymphonyElixir.GitHub.Client do
         state: state,
         url: issue["html_url"],
         assignee_id: get_in(issue, ["assignee", "login"]),
-        labels: extract_labels(issue),
+        labels: labels,
+        priority: label_priority(labels),
         blocked_by: [],
         dispatchable: not Map.has_key?(issue, "pull_request"),
         created_at: parse_datetime(issue["created_at"]),
@@ -239,6 +242,16 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp extract_labels(_issue), do: []
+
+  # A `priority:N` label (N 1..4, Linear's scale) feeds the orchestrator's dispatch order; the lowest N wins.
+  defp label_priority(labels) do
+    labels
+    |> Enum.flat_map(fn
+      "priority:" <> n when n in ["1", "2", "3", "4"] -> [String.to_integer(n)]
+      _ -> []
+    end)
+    |> Enum.min(fn -> nil end)
+  end
 
   defp parse_datetime(value) when is_binary(value) do
     case DateTime.from_iso8601(value) do
