@@ -1004,6 +1004,43 @@ defmodule SymphonyElixir.CoreTest do
     assert dispatched.slot_waits == %{}
   end
 
+  test "a due retry yields its free slot to a waiting issue of better priority, and the poll dispatches that one" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-yield-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: test_root,
+      hook_before_run: "exit 1",
+      max_concurrent_agents: 1
+    )
+
+    retry = %Issue{id: "retry", identifier: "MT-1", title: "Parked landing", state: "In Progress", dispatchable: true, labels: []}
+    urgent = %Issue{id: "urgent", identifier: "MT-2", title: "Others wait on it", state: "In Progress", dispatchable: true, labels: [], priority: 1}
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [retry, urgent])
+    busy = %{"busy" => %{issue: %Issue{id: "busy", identifier: "MT-0", state: "In Progress"}, identifier: "MT-0"}}
+
+    # the poll saw the priority:1 issue while every slot was busy
+    polled = Orchestrator.choose_issues_for_test([urgent], %Orchestrator.State{max_concurrent_agents: 1, running: busy, task_supervisor: task_supervisor})
+    assert polled.waiting_rank == 1
+
+    # a slot frees and the retry's timer fires first: it yields, keeping its attempt
+    freed = %{polled | running: %{}, claimed: MapSet.new(["retry"])}
+    yielded = Orchestrator.handle_retry_issue_lookup_for_test(retry, freed, "retry", 4, %{identifier: "MT-1"})
+    refute Map.has_key?(yielded.running, "retry")
+    assert yielded.slot_waits["retry"] == {4, nil}
+
+    # the poll gives the slot to the priority:1 issue
+    dispatched = Orchestrator.choose_issues_for_test([retry, urgent], yielded)
+    assert Map.keys(dispatched.running) == ["urgent"]
+    assert dispatched.slot_waits["retry"] == {4, nil}
+
+    # with no better issue waiting, a retry takes the free slot as before
+    plain = Orchestrator.handle_retry_issue_lookup_for_test(retry, %{freed | waiting_rank: 5}, "retry", 4, %{identifier: "MT-1"})
+    assert plain.running["retry"].retry_attempt == 4
+  end
+
   test "retry releases its claim when dispatch revalidation no longer finds the issue" do
     test_root =
       Path.join(

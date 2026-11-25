@@ -40,6 +40,8 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: %{},
       retry_attempts: %{},
       slot_waits: %{},
+      # the best priority rank the last poll left waiting for a slot: a due retry ranked worse yields its slot to it
+      waiting_rank: 5,
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -787,16 +789,33 @@ defmodule SymphonyElixir.Orchestrator do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
 
+    state =
+      issues
+      |> sort_issues_for_dispatch()
+      |> Enum.reduce(state, fn issue, state_acc ->
+        if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
+          {attempt, worker_host} = Map.get(state_acc.slot_waits, issue.id, {nil, nil})
+          dispatch_issue(state_acc, issue, attempt, worker_host)
+        else
+          state_acc
+        end
+      end)
+
+    %{state | waiting_rank: waiting_rank(issues, state, active_states, terminal_states)}
+  end
+
+  defp waiting_rank(issues, %State{running: running, claimed: claimed, blocked: blocked}, active_states, terminal_states) do
     issues
-    |> sort_issues_for_dispatch()
-    |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        {attempt, worker_host} = Map.get(state_acc.slot_waits, issue.id, {nil, nil})
-        dispatch_issue(state_acc, issue, attempt, worker_host)
-      else
-        state_acc
-      end
+    |> Enum.filter(fn
+      %Issue{} = issue ->
+        candidate_issue?(issue, active_states, terminal_states) and !MapSet.member?(claimed, issue.id) and
+          !Map.has_key?(running, issue.id) and !Map.has_key?(blocked, issue.id)
+
+      _ ->
+        false
     end)
+    |> Enum.map(&priority_rank(&1.priority))
+    |> Enum.min(fn -> 5 end)
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -1186,6 +1205,27 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
+    if priority_rank(issue.priority) > state.waiting_rank do
+      # A retry's timer fires between polls and took every freed slot, so an issue others wait on (priority:1) waited
+      # 24-59 min behind landings' retries (2026-11-25). It yields: back in the poll's queue, and the poll runs now.
+      Logger.debug("Retry of #{issue_context(issue)} yields its slot to a waiting issue of priority #{state.waiting_rank}")
+
+      released = release_issue_claim(state, issue.id)
+      released = %{released | slot_waits: Map.put(released.slot_waits, issue.id, {attempt, metadata[:worker_host]})}
+      {:noreply, poll_now(released)}
+    else
+      dispatch_active_retry(state, issue, attempt, metadata)
+    end
+  end
+
+  defp poll_now(%State{} = state), do: if(poll_coming?(state), do: state, else: schedule_tick(state, 0))
+
+  defp poll_coming?(%State{} = state) do
+    due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= System.monotonic_time(:millisecond)
+    state.poll_check_in_progress == true or due?
+  end
+
+  defp dispatch_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
@@ -1487,10 +1527,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call(:request_refresh, _from, state) do
-    now_ms = System.monotonic_time(:millisecond)
-    already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
-    coalesced = state.poll_check_in_progress == true or already_due?
-    state = if coalesced, do: state, else: schedule_tick(state, 0)
+    coalesced = poll_coming?(state)
+    state = poll_now(state)
 
     {:reply,
      %{
