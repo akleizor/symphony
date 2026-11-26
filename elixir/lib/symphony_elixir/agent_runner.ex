@@ -112,18 +112,14 @@ defmodule SymphonyElixir.AgentRunner do
 
       case continue_with_issue?(issue, issue_state_fetcher) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+          if Keyword.get(opts, :outranked?, fn _issue -> false end).(refreshed_issue) do
+            # the orchestrator's continuation retry then yields the slot to the better-priority issue waiting
+            Logger.info("A better-priority issue waits; returning control to orchestrator after #{issue_context(refreshed_issue)} turn=#{turn_number}/#{max_turns}")
 
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
+            :ok
+          else
+            continue_run(app_session, workspace, refreshed_issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns)
+          end
 
         {:continue, refreshed_issue} ->
           Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
@@ -137,6 +133,12 @@ defmodule SymphonyElixir.AgentRunner do
           {:error, reason}
       end
     end
+  end
+
+  defp continue_run(app_session, workspace, refreshed_issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+    Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+    do_run_codex_turns(app_session, workspace, refreshed_issue, codex_update_recipient, opts, issue_state_fetcher, turn_number + 1, max_turns)
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)

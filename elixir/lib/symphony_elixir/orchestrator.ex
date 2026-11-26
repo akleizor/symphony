@@ -977,7 +977,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             outranked?: &outranked?(recipient, &1)
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1447,7 +1451,18 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  # Asked by a worker between turns: unanswered means no, so the run goes on as it did before the question existed.
+  defp outranked?(orchestrator, %Issue{priority: priority}) do
+    GenServer.call(orchestrator, {:outranked?, priority}, 5_000)
+  catch
+    :exit, _ -> false
+  end
+
   @impl true
+  def handle_call({:outranked?, priority}, _from, state) do
+    {:reply, priority_rank(priority) > state.waiting_rank, state}
+  end
+
   def handle_call(:snapshot, _from, state) do
     state = refresh_runtime_config(state)
     now = DateTime.utc_now()
