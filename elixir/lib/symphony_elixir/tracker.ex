@@ -21,6 +21,10 @@ defmodule SymphonyElixir.Tracker do
 
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   @callback fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+
+  @callback fetch_issues_updated_since([String.t()], String.t()) ::
+              {:ok, [Issue.t()]} | {:error, term()}
+
   @callback agent_tool_specs() :: [map()]
   @callback execute_agent_tool(String.t(), term(), keyword()) :: map()
   @callback secret_environment_names(map()) :: [String.t()]
@@ -38,6 +42,19 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) do
     adapter().fetch_issues_by_ids(issue_ids)
+  end
+
+  @doc """
+  Reads issues in `states` updated at or after `since` (ISO 8601).
+
+  An adapter without an incremental read returns `{:error, :not_supported}` so
+  the orchestrator falls back to its startup sweep instead of refetching the
+  whole terminal set each poll.
+  """
+  @spec fetch_issues_updated_since([String.t()], String.t()) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_updated_since(states, since) do
+    adapter().fetch_issues_updated_since(states, since)
   end
 
   @doc """

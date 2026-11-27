@@ -41,6 +41,13 @@ defmodule SymphonyElixir.GitHub.Client do
     fetch_issues_by_ids(issue_ids, Config.settings!().tracker, &perform_request/5)
   end
 
+  @spec fetch_issues_updated_since([String.t()], String.t()) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_updated_since(state_names, since)
+      when is_list(state_names) and is_binary(since) do
+    fetch_issues_updated_since(state_names, since, Config.settings!().tracker, &perform_request/5)
+  end
+
   @spec request(String.t(), String.t(), map(), term(), keyword()) ::
           {:ok, %{status: integer(), body: term()}} | {:error, term()}
   def request(method, path, params, body, opts \\ [])
@@ -80,6 +87,15 @@ defmodule SymphonyElixir.GitHub.Client do
     fetch_issues_by_ids(issue_ids, tracker_settings, request_fun)
   end
 
+  @doc false
+  @spec fetch_issues_updated_since_for_test([String.t()], String.t(), map(), function()) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_updated_since_for_test(state_names, since, tracker_settings, request_fun)
+      when is_list(state_names) and is_binary(since) and is_map(tracker_settings) and
+             is_function(request_fun, 5) do
+    fetch_issues_updated_since(state_names, since, tracker_settings, request_fun)
+  end
+
   defp fetch_issues_by_states(state_names, tracker_settings, request_fun) do
     normalized_states = state_names |> Enum.map(&normalize_state/1) |> MapSet.new()
 
@@ -89,7 +105,29 @@ defmodule SymphonyElixir.GitHub.Client do
 
       state_query ->
         with {:ok, github_settings} <- settings(tracker_settings) do
-          do_fetch_pages(github_settings, state_query, normalized_states, 1, request_fun, [])
+          do_fetch_pages(github_settings, state_query, normalized_states, 1, request_fun, %{}, [])
+        end
+    end
+  end
+
+  defp fetch_issues_updated_since(state_names, since, tracker_settings, request_fun) do
+    normalized_states = state_names |> Enum.map(&normalize_state/1) |> MapSet.new()
+
+    case github_state_query(normalized_states) do
+      nil ->
+        {:ok, []}
+
+      state_query ->
+        with {:ok, github_settings} <- settings(tracker_settings) do
+          do_fetch_pages(
+            github_settings,
+            state_query,
+            normalized_states,
+            1,
+            request_fun,
+            %{"since" => since},
+            []
+          )
         end
     end
   end
@@ -108,14 +146,18 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp do_fetch_pages(settings, state_query, requested_states, page, request_fun, acc) do
-    params = %{
-      "state" => state_query,
-      "per_page" => @page_size,
-      "page" => page,
-      "sort" => "created",
-      "direction" => "asc"
-    }
+  defp do_fetch_pages(settings, state_query, requested_states, page, request_fun, extra_params, acc) do
+    params =
+      Map.merge(
+        %{
+          "state" => state_query,
+          "per_page" => @page_size,
+          "page" => page,
+          "sort" => "created",
+          "direction" => "asc"
+        },
+        extra_params
+      )
 
     with {:ok, payload} <-
            request_with_settings(
@@ -134,7 +176,15 @@ defmodule SymphonyElixir.GitHub.Client do
       if length(payload) < @page_size do
         {:ok, updated_acc |> Enum.reverse() |> List.flatten()}
       else
-        do_fetch_pages(settings, state_query, requested_states, page + 1, request_fun, updated_acc)
+        do_fetch_pages(
+          settings,
+          state_query,
+          requested_states,
+          page + 1,
+          request_fun,
+          extra_params,
+          updated_acc
+        )
       end
     end
   end

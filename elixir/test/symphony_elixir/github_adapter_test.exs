@@ -212,6 +212,42 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              )
   end
 
+  test "client reads terminal issues updated since the watermark" do
+    request_fun = fn "GET", "/repos/octo/repo/issues", params, nil, _settings ->
+      send(self(), {:github_since, params})
+      {:ok, %{status: 200, body: [Map.put(raw_issue(7), "state", "closed")]}}
+    end
+
+    assert {:ok, [issue]} =
+             GitHubClient.fetch_issues_updated_since_for_test(
+               ["Closed"],
+               "2026-11-27T00:00:00Z",
+               tracker_settings(),
+               request_fun
+             )
+
+    assert issue.identifier == "GH-7"
+    assert issue.state == "closed"
+
+    assert_receive {:github_since,
+                    %{
+                      "state" => "closed",
+                      "since" => "2026-11-27T00:00:00Z",
+                      "per_page" => 100,
+                      "page" => 1
+                    }}
+
+    assert {:ok, []} =
+             GitHubClient.fetch_issues_updated_since_for_test(
+               ["In Progress"],
+               "2026-11-27T00:00:00Z",
+               tracker_settings(),
+               fn _method, _path, _params, _body, _settings ->
+                 flunk("unsupported GitHub states should not make an HTTP request")
+               end
+             )
+  end
+
   test "client refreshes numeric IDs in order, omits 404s, and rejects malformed refreshes" do
     request_fun = fn "GET", path, %{}, nil, _settings ->
       send(self(), {:github_id_path, path})
