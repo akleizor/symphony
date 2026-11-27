@@ -30,6 +30,20 @@ defmodule SymphonyElixir.Tracker.Memory do
      end)}
   end
 
+  @spec fetch_issues_updated_since([String.t()], String.t()) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_updated_since(state_names, since) when is_binary(since) do
+    with {:ok, since_at, _offset} <- DateTime.from_iso8601(since),
+         {:ok, issues} <- fetch_issues_by_states(state_names) do
+      {:ok, Enum.filter(issues, &updated_since?(&1, since_at))}
+    end
+  end
+
+  defp updated_since?(%Issue{updated_at: %DateTime{} = updated_at}, since_at),
+    do: DateTime.compare(updated_at, since_at) != :lt
+
+  defp updated_since?(_issue, _since_at), do: false
+
   @spec secret_environment_names(map()) :: [String.t()]
   def secret_environment_names(_tracker_settings), do: []
 

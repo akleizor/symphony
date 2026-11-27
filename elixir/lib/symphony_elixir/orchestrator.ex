@@ -14,6 +14,9 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  # An incremental terminal read starts this far before the last one ended, so an
+  # issue updated while the request was in flight is not skipped.
+  @terminal_poll_overlap_seconds 60
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -33,6 +36,9 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      # The last incremental terminal read ended here; nil means the startup sweep
+      # did not complete, so the next poll retries it.
+      :terminal_poll_since,
       task_supervisor: SymphonyElixir.TaskSupervisor,
       running: %{},
       completed: MapSet.new(),
@@ -67,12 +73,16 @@ defmodule SymphonyElixir.Orchestrator do
           poll_check_in_progress: false,
           tick_timer_ref: nil,
           tick_token: nil,
+          terminal_poll_since:
+            case run_terminal_workspace_cleanup() do
+              :ok -> DateTime.utc_now()
+              :error -> nil
+            end,
           task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor),
           codex_totals: @empty_codex_totals,
           codex_rate_limits: nil
         }
 
-        run_terminal_workspace_cleanup()
         state = schedule_tick(state, 0)
 
         {:ok, state}
@@ -261,6 +271,7 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> reconcile_terminal_workspaces()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states),
@@ -358,6 +369,70 @@ defmodule SymphonyElixir.Orchestrator do
       end
     end
   end
+
+  # A close Symphony never sees as a transition leaves its workspace behind: an issue
+  # closed while it waits in the queue, or after its turn parked it (the label that
+  # made it routable is gone, so it drops out of tracking), is not observed.
+  # Each poll reads the terminal issues updated since the previous read.
+  defp reconcile_terminal_workspaces(%State{terminal_poll_since: :unsupported} = state), do: state
+
+  defp reconcile_terminal_workspaces(%State{} = state) do
+    case Config.settings() do
+      {:ok, config} ->
+        reconcile_terminal_workspaces(state, config.tracker.terminal_states)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp reconcile_terminal_workspaces(%State{} = state, []), do: state
+
+  defp reconcile_terminal_workspaces(%State{} = state, terminal_states) do
+    terminal_set =
+      terminal_states
+      |> Enum.map(&normalize_issue_state/1)
+      |> Enum.filter(&(&1 != ""))
+      |> MapSet.new()
+
+    case fetch_terminal_issues_since(terminal_states, state.terminal_poll_since) do
+      {:ok, issues} ->
+        Enum.each(issues, &cleanup_terminal_issue(&1, terminal_set))
+        %{state | terminal_poll_since: DateTime.utc_now()}
+
+      {:error, :not_supported} ->
+        Logger.info("Tracker has no incremental terminal read; workspaces of closed issues are cleaned at startup only")
+
+        %{state | terminal_poll_since: :unsupported}
+
+      {:error, reason} ->
+        Logger.warning("Skipping terminal workspace reconcile; failed to fetch recently updated terminal issues: #{inspect(reason)}")
+
+        state
+    end
+  end
+
+  defp cleanup_terminal_issue(%Issue{state: issue_state} = issue, terminal_set) do
+    if terminal_issue_state?(issue_state, terminal_set) do
+      cleanup_issue_workspace(issue)
+    end
+  end
+
+  defp cleanup_terminal_issue(_issue, _terminal_set), do: :ok
+
+  defp fetch_terminal_issues_since(terminal_states, %DateTime{} = watermark) do
+    since = DateTime.add(watermark, -@terminal_poll_overlap_seconds, :second)
+    Tracker.fetch_issues_updated_since(terminal_states, DateTime.to_iso8601(since))
+  end
+
+  # No watermark: the startup sweep did not complete, so this poll stands in for it.
+  defp fetch_terminal_issues_since(terminal_states, _watermark) do
+    Tracker.fetch_issues_by_states(terminal_states)
+  end
+
+  @doc false
+  @spec reconcile_terminal_workspaces_for_test(term()) :: term()
+  def reconcile_terminal_workspaces_for_test(%State{} = state), do: reconcile_terminal_workspaces(state)
 
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
@@ -1199,8 +1274,12 @@ defmodule SymphonyElixir.Orchestrator do
             :ok
         end)
 
+        :ok
+
       {:error, reason} ->
         Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+
+        :error
     end
   end
 

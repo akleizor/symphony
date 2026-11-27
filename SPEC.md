@@ -813,8 +813,9 @@ Retry handling behavior:
 
 Note:
 
-- Terminal-state workspace cleanup is handled by startup cleanup, active-run reconciliation, and
-  retry refreshes that observe a terminal transition.
+- Terminal-state workspace cleanup is handled by startup cleanup, active-run reconciliation,
+  retry refreshes that observe a terminal transition, and the incremental terminal reconcile
+  in 8.7 (a close the service never observes as a transition).
 - ID refresh avoids treating a terminal, non-active, or newly unroutable issue as merely absent.
 
 ### 8.5 Active Run Reconciliation
@@ -848,6 +849,21 @@ When the service starts:
 3. If the terminal-issues fetch fails, log a warning and continue startup.
 
 This prevents stale terminal workspaces from accumulating after restarts.
+
+### 8.7 Incremental Terminal Workspace Reconcile
+
+A close is only a transition when the service is already tracking the issue. An issue closed
+while it waits in the queue, or after its run ends with the issue no longer routable, is never
+observed, so its workspace would stay until the next restart.
+
+Each poll therefore:
+
+1. Reads issues in terminal states updated since the previous read. The `since` value is the
+   previous read's completion time minus 60 s, so an update during the request is not skipped.
+2. Removes the workspace of each returned issue whose state is terminal.
+3. Advances the watermark on success only; a failed read is logged and retried on the next poll.
+4. If the startup cleanup's fetch failed, the first poll retries the full terminal read.
+5. An adapter without an incremental read skips this reconcile; startup cleanup still applies.
 
 ## 9. Workspace Management and Safety
 

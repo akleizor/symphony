@@ -682,6 +682,72 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "the poll after a close cleans a workspace the service never saw running" do
+    # 2026-11-27: an issue closed while queued, or after its turn parked it, is never a
+    # transition Symphony observes, so its workspace stayed until the next restart.
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-closed-while-queued-#{System.unique_integer([:positive])}"
+      )
+
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    cleanup_marker = Path.join(test_root, "before-remove-ran")
+    issue_identifier = "MT-700"
+    workspace = Path.join(test_root, issue_identifier)
+    orchestrator_name = Module.concat(__MODULE__, :ClosedWhileQueuedOrchestrator)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress"],
+        tracker_terminal_states: ["Closed"],
+        poll_interval_ms: 60_000,
+        hook_before_remove: "printf ran > \"#{cleanup_marker}\""
+      )
+
+      # The startup sweep sees no issues: the close happens while the service runs.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        restore_app_env(:memory_tracker_issues, previous_memory_issues)
+
+        if Process.alive?(pid) do
+          Process.exit(pid, :normal)
+        end
+      end)
+
+      File.mkdir_p!(workspace)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+        %Issue{
+          id: "700",
+          identifier: issue_identifier,
+          state: "Closed",
+          title: "Closed while queued",
+          labels: ["hive"],
+          updated_at: DateTime.utc_now()
+        }
+      ])
+
+      state = :sys.get_state(pid)
+      refute Map.has_key?(state.running, "700")
+      assert match?(%DateTime{}, state.terminal_poll_since)
+
+      send(pid, :tick)
+
+      assert eventually_value(fn -> if File.exists?(workspace), do: nil, else: true end)
+      assert File.read!(cleanup_marker) == "ran"
+      assert DateTime.compare(:sys.get_state(pid).terminal_poll_since, state.terminal_poll_since) == :gt
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "missing running issues stop active agents without cleaning the workspace" do
     test_root =
       Path.join(
