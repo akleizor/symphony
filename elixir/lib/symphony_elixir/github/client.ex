@@ -255,7 +255,8 @@ defmodule SymphonyElixir.GitHub.Client do
         labels: labels,
         priority: label_priority(labels),
         blocked_by: [],
-        dispatchable: not Map.has_key?(issue, "pull_request"),
+        # GitHub's own count of open native blockers ("blocked by"): the issue waits until each one closes
+        dispatchable: not Map.has_key?(issue, "pull_request") and open_blockers(issue) == 0,
         created_at: parse_datetime(issue["created_at"]),
         updated_at: parse_datetime(issue["updated_at"])
       }
@@ -263,6 +264,9 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp normalize_issue(_issue, _repo), do: nil
+
+  defp open_blockers(%{"issue_dependencies_summary" => %{"blocked_by" => n}}) when is_integer(n), do: n
+  defp open_blockers(_issue), do: 0
 
   defp native_ref(issue, repo) do
     %{

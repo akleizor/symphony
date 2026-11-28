@@ -212,6 +212,23 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
              )
   end
 
+  test "an open native blocker holds the issue back, a closed one does not, at no extra read" do
+    summary = fn open, total ->
+      %{"issue_dependencies_summary" => %{"blocked_by" => open, "total_blocked_by" => total}}
+    end
+
+    request_fun = fn "GET", "/repos/octo/repo/issues", _params, nil, _settings ->
+      {:ok, %{status: 200, body: [raw_issue(1), Map.merge(raw_issue(2), summary.(1, 1)), Map.merge(raw_issue(3), summary.(0, 1))]}}
+    end
+
+    assert {:ok, [free, held, released]} =
+             GitHubClient.fetch_issues_by_states_for_test(["Open"], tracker_settings(), request_fun)
+
+    assert free.dispatchable
+    refute held.dispatchable
+    assert released.dispatchable
+  end
+
   test "client reads terminal issues updated since the watermark" do
     request_fun = fn "GET", "/repos/octo/repo/issues", params, nil, _settings ->
       send(self(), {:github_since, params})
